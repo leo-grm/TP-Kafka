@@ -1,0 +1,130 @@
+===============================================================================
+ TP2 - Communication entre microservices via Kafka : architecture
+===============================================================================
+
+1. DU TP1 AU TP2
+-------------------------------------------------------------------------------
+
+TP1 (synchrone, REST) :
+
+    commandes  ---- GET /clients/1 ---->  clients
+               <--- réponse JSON -------
+
+  - commandes appelle clients directement et ATTEND la réponse.
+  - Si clients est arrêté, l'appel échoue (erreur 503).
+  - commandes doit connaître l'adresse de clients (couplage fort).
+
+TP2 (asynchrone, événements) :
+
+    commandes  --- publie --->  [ KAFKA ]  --- lit --->  clients
+
+  - commandes publie un événement "une commande a été créée" dans Kafka
+    puis continue immédiatement, sans attendre personne.
+  - clients lit l'événement quand il est disponible.
+  - commandes ne connaît pas clients : il ne connaît que Kafka et le topic.
+  - Si clients est arrêté, les événements restent stockés dans Kafka et
+    seront lus au redémarrage (voir partie 1.6).
+
+
+2. ARCHITECTURE GLOBALE PROPOSÉE
+(i) Dessin grâce à Chagpt pour mettre en forme : 
+-------------------------------------------------------------------------------
+
+                         Machine hôte (Windows)
+     localhost:8081       localhost:8080      localhost:8090     localhost:9094
+          |                     |                   |                  |
+ +--------|---------------------|-------------------|------------------|------+
+ |        |      Réseau Docker "tp-kafka-network"   |                  |      |
+ |        v                     v                   v                  |      |
+ |  +-------------+      +-------------+     +------------+            |      |
+ |  |  commandes  |      |   clients   |     |  kafka-ui  |            |      |
+ |  | (PRODUCTEUR)|      |(CONSOMMATEUR|     | (interface |            |      |
+ |  |  API REST   |      |  API REST   |     |  web)      |            |      |
+ |  +------+------+      +------^------+     +-----+------+            |      |
+ |         |                    |                  | observe           |      |
+ |         | publie             | consomme         |                   |      |
+ |         | (kafka:9092)       | group: clients-group                 |      |
+ |         v                    |                  v                   v      |
+ |  +--------------------------------------------------------------------+    |
+ |  |                    KAFKA (broker, mode KRaft)                      |    |
+ |  |                                                                    |    |
+ |  |   topic "commandes-creees"                                         |    |
+ |  |     partition 0 : [evt][evt][evt] ...                              |    |
+ |  |     partition 1 : [evt][evt] ...                                   |    |
+ |  +--------------------------------------------------------------------+    |
+ |                                 |                                          |
+ |                                 | consomme (group: statistiques-group)     |
+ |                                 v                                          |
+ |                        +------------------+                                |
+ |                        |  statistiques    |  (partie 1.7)                  |
+ |                        |  (CONSOMMATEUR)  |                                |
+ |                        +------------------+                                |
+ +----------------------------------------------------------------------------+
+
+Rôle de chaque élément :
+
+  - commandes    : API REST. Quand une commande est créée (POST /commandes),
+                   il publie un événement dans le topic "commandes-creees".
+  - Kafka        : broker de messages. Stocke les événements sur disque, dans
+                   l'ordre, et les met à disposition des consommateurs.
+  - clients      : consommateur. Lit chaque événement, affiche client /
+                   produit / montant et tient à jour le nombre de commandes
+                   par client.
+  - statistiques : 2e consommateur (1.7). Nombre de commandes par produit,
+                   chiffre d'affaires par mois.
+  - kafka-ui     : outil d'observation (pas obligatoire) pour voir les topics,
+                   les messages et les groupes de consommateurs.
+
+Adresses utilisées :
+
+  - Entre conteneurs (réseau Docker) : kafka:9092
+  - Depuis la machine hôte (tests)   : localhost:9094
+  - Interface web kafka-ui           : http://localhost:8090
+
+Il n'y a plus d'appel REST direct de commandes vers clients : toute la
+communication entre microservices passe par Kafka.
+
+
+3. PRINCIPE D'UN ÉVÉNEMENT (partie 1.2)
+-------------------------------------------------------------------------------
+
+Un événement décrit un fait qui S'EST PRODUIT (au passé) : "commande créée".
+Il ne demande rien à personne, contrairement à une requête REST.
+
+Exemple d'événement publié par commandes :
+
+    {
+      "commande_id": 10,
+      "client_id": 2,
+      "produit": "PC",
+      "montant": 1200
+    }
+
+Cycle de vie :
+
+  1. Un utilisateur crée une commande :  POST /commandes  (sur commandes)
+  2. commandes publie l'événement dans le topic "commandes-creees"
+  3. Kafka ajoute l'événement à la fin d'une partition du topic
+  4. clients (et plus tard statistiques) lisent l'événement et le traitent
+
+L'événement est conservé dans Kafka après lecture : chaque groupe de
+consommateurs garde sa propre position de lecture (offset). C'est ce qui
+permet à plusieurs services de lire les mêmes événements, chacun à son rythme.
+
+
+4. VOCABULAIRE KAFKA
+-------------------------------------------------------------------------------
+
+  Broker       : le serveur Kafka qui reçoit, stocke et distribue les messages.
+  Topic        : une "file" nommée de messages (ici "commandes-creees").
+  Partition    : un topic est découpé en partitions, qui permettent de
+                 répartir la lecture entre plusieurs consommateurs.
+  Producteur   : service qui écrit des messages dans un topic (commandes).
+  Consommateur : service qui lit les messages d'un topic (clients).
+  Offset       : numéro d'un message dans une partition = position de lecture.
+  Groupe de consommateurs (group_id) :
+                 - même groupe      -> les messages sont RÉPARTIS entre eux
+                                       (chacun en reçoit une partie)
+                 - groupes différents -> chaque groupe reçoit TOUS les messages
+  KRaft        : mode de fonctionnement de Kafka sans Zookeeper (Kafka gère
+                 lui-même ses métadonnées). Utilisé ici pour simplifier.

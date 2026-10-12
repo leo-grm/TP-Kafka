@@ -1,0 +1,179 @@
+===============================================================================
+ TP3 - Microservice de prédiction avec Kafka : architecture
+===============================================================================
+
+1. DU TP1 AU TP3
+-------------------------------------------------------------------------------
+
+TP1 (synchrone, REST) :
+
+    commandes  ---- GET /clients/1 ---->  clients
+               <--- réponse JSON -------
+
+  - commandes appelle clients directement et ATTEND la réponse.
+  - Si clients est arrêté, l'appel échoue (erreur 503).
+  - commandes doit connaître l'adresse de clients (couplage fort).
+
+TP2 (asynchrone, événements) :
+
+    commandes  --- publie --->  [ KAFKA ]  --- lit --->  clients
+
+  - commandes publie un événement "une commande a été créée" dans Kafka
+    puis continue immédiatement, sans attendre personne.
+  - clients lit l'événement quand il est disponible.
+  - commandes ne connaît pas clients : il ne connaît que Kafka et le topic.
+  - Si clients est arrêté, les événements restent stockés dans Kafka et
+    seront lus au redémarrage.
+
+TP3 (asynchrone, aller-retour avec un modèle de Machine Learning) :
+
+    commandes  --- publie --->  [ KAFKA ]  --- lit ----->  prediction (x K)
+    commandes  <--- lit ------  [ KAFKA ]  <--- publie --  prediction (x K)
+
+  - commandes publie une DEMANDE de prédiction (les caractéristiques d'un
+    client) dans un premier topic.
+  - prediction lit la demande, applique le modèle et publie le RÉSULTAT dans
+    un second topic.
+  - commandes lit ce second topic et affiche le résultat.
+  - commandes n'attend pas : il répond 202 tout de suite, le résultat arrive
+    plus tard. Il ne sait pas combien d'instances de prediction existent.
+
+
+ ARCHITECTURE GLOBALE PROPOSÉE
+(i) Dessin mis en forme avec l'aide d'une IA :
+-------------------------------------------------------------------------------
+
+                         Machine hôte (Windows)
+
+   flux.py (POST /predictions en boucle)
+       |
+  localhost:8081     localhost:8080     localhost:8082     localhost:8090
+       |                   |                  |                  |
+ +-----|-------------------|------------------|------------------|-----------+
+ |     |          Réseau Docker "tp-kafka-network"               |           |
+ |     v                   v                  v                  v           |
+ | +-------------+   +-------------+   +--------------+   +------------+     |
+ | |  commandes  |   |   clients   |   | statistiques |   |  kafka-ui  |     |
+ | | PRODUCTEUR  |   |CONSOMMATEUR |   | CONSOMMATEUR |   | (interface |     |
+ | | + CONSOMM.  |   |  API REST   |   |   API REST   |   |    web)    |     |
+ | +--+-------^--+   +------^------+   +------^-------+   +-----+------+     |
+ |    |       |             |                 |                 |            |
+ |    | publie| consomme    | consomme        | consomme        | observe    |
+ |    |       | commandes-  | clients-group   | statistiques-   |            |
+ |    |       | group       |                 | group           |            |
+ |    v       |             |                 |                 v            |
+ | +----------------------------------------------------------------------+  |
+ | |                    KAFKA (broker, mode KRaft)                        |  |
+ | |                                                                      |  |
+ | |  topic "commandes-creees"     (TP2)  commandes  -> clients, stats    |  |
+ | |  topic "demandes-prediction"  (TP3)  commandes  -> prediction        |  |
+ | |  topic "predictions"          (TP3)  prediction -> commandes         |  |
+ | |                                                                      |  |
+ | |  6 partitions par topic : [evt][evt][evt] ...                        |  |
+ | +----------------------------------------------------------------------+  |
+ |         |  consomme "demandes-prediction"        ^                        |
+ |         |  (group: prediction-group)             |  publie "predictions"  |
+ |         v                                        |                        |
+ | +--------------+  +--------------+  +--------------+                      |
+ | | prediction-1 |  | prediction-2 |  | prediction-3 |  K instances (.env)  |
+ | |  modèle .pkl |  |  modèle .pkl |  |  modèle .pkl |  pas d'API REST      |
+ | +--------------+  +--------------+  +--------------+                      |
+ +---------------------------------------------------------------------------+
+
+Rôle de chaque élément :
+
+  - commandes    : API REST. Publie "commandes-creees" (POST /commandes) et
+                   "demandes-prediction" (POST /predictions). Consomme
+                   "predictions" et affiche chaque résultat dans ses logs.
+  - prediction   : ni API ni port. Charge le modèle au démarrage, puis boucle :
+                   lire une demande, prédire, publier le résultat.
+                   Lancé en K exemplaires, tous dans le même groupe.
+  - Kafka        : broker de messages. Stocke les événements sur disque, dans
+                   l'ordre, et les met à disposition des consommateurs.
+  - clients      : consommateur (TP2). Nombre de commandes par client.
+  - statistiques : consommateur (TP2). Nombre de commandes par produit,
+                   chiffre d'affaires par mois.
+  - kafka-ui     : outil d'observation (pas obligatoire) pour voir les topics,
+                   les messages et les groupes de consommateurs.
+  - flux.py      : script lancé depuis la machine, hors Docker. Envoie une
+                   demande de prédiction aléatoire toutes les 0,5 s.
+
+Adresses utilisées :
+
+  - Entre conteneurs (réseau Docker) : kafka:9092
+  - Depuis la machine hôte (tests)   : localhost:9094
+  - Interface web kafka-ui           : http://localhost:8090
+
+Il n'y a aucun appel REST entre microservices : toute la communication entre
+eux passe par Kafka.
+
+
+3. LES ÉVÉNEMENTS
+-------------------------------------------------------------------------------
+
+Un événement décrit un fait qui S'EST PRODUIT (au passé) : "commande créée".
+Il ne demande rien à personne, contrairement à une requête REST.
+
+Événement du TP2, topic "commandes-creees" :
+
+    {
+      "commande_id": 10,
+      "client_id": 2,
+      "produit": "PC",
+      "montant": 1200
+    }
+
+Demande de prédiction (TP3), topic "demandes-prediction" :
+
+    {
+      "client_id": 25,
+      "age": 32,
+      "anciennete": 3,
+      "nombre_commandes": 8,
+      "montant_total": 1250,
+      "montant_moyen": 156.25,
+      "jours_depuis_derniere_commande": 12
+    }
+
+Résultat de prédiction (TP3), topic "predictions" :
+
+    {
+      "client_id": 25,
+      "prediction": 1,
+      "probabilite_commande": 0.66
+    }
+
+Cycle de vie d'une prédiction :
+
+  1. Un utilisateur (ou flux.py) envoie :  POST /predictions  (sur commandes)
+  2. commandes publie la demande dans "demandes-prediction", clé = client_id
+  3. Kafka l'ajoute à la fin d'une partition du topic
+  4. L'instance de prediction qui possède cette partition lit la demande
+  5. Elle construit l'entrée du modèle (6 colonnes), calcule la prédiction
+     et la probabilité
+  6. Elle publie le résultat dans "predictions"
+  7. commandes lit le résultat et l'affiche
+
+Le modèle est entraîné UNE fois, hors du microservice (entrainer.py), puis
+sauvegardé dans modele_commande.pkl. Le microservice ne fait que le charger :
+il n'apprend jamais, il prédit.
+
+
+4. K INSTANCES, PANNE ET MONTÉE EN CHARGE (partie 3.7)
+-------------------------------------------------------------------------------
+
+  - Les K instances de prediction ont le même group_id : Kafka leur RÉPARTIT
+    les partitions. Avec K = 3 et 6 partitions, chacune en lit 2.
+  - Il faut au moins autant de partitions que d'instances, sinon les
+    instances en trop ne reçoivent rien.
+  - Si une instance s'arrête, Kafka attend environ 45 s (délai de session)
+    puis redonne ses partitions aux autres. Les demandes ne sont pas perdues,
+    elles attendent dans Kafka.
+  - Une demande peut être traitée deux fois après une panne : la position de
+    lecture n'est enregistrée que toutes les 5 s ("au moins une fois").
+  - Test réalisé : 445 demandes, 2 instances arrêtées sur 3 pendant le flux.
+    0 demande perdue, 7 traitées en double.
+  - Montée en charge : on surveille le lag du groupe. S'il augmente, on
+    ajoute des instances (et des partitions si nécessaire).
+
+

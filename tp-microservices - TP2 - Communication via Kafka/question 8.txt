@@ -1,0 +1,49 @@
+8 - Kafka et groupes de consommateurs
+========================================
+
+Le topic commandes-creees a 2 partitions (partition 0 et partition 1).
+La clé des messages est le client_id : ici Alex (2) va en partition 0,
+Alice (1) et Madeleine (3) vont en partition 1.
+
+
+Config 1 : deux consommateurs dans le MÊME groupe (groupe-A)
+-----------------------------------------------------------
+Deux conteneurs lancés avec l'image de statistiques et GROUP_ID=groupe-A : (docker rm -f conso-a1 conso-a2)
+
+docker run -d --name conso-a1 --network tp-kafka-network -e KAFKA_BOOTSTRAP_SERVERS=kafka:9092 -e GROUP_ID=groupe-A tp-microservices-statistiques
+docker run -d --name conso-a2 --network tp-kafka-network -e KAFKA_BOOTSTRAP_SERVERS=kafka:9092 -e GROUP_ID=groupe-A tp-microservices-statistiques
+
+Kafka donne une partition à chacun (kafka-consumer-groups.sh --describe --group groupe-A) :
+  partition 0 -> conso-a1
+  partition 1 -> conso-a2
+
+Puis 4 commandes (Souris, Casque, Clavier, Ecran) :
+  conso-a1 : commande 8 (Casque, Alex)                   <- partition 0
+  conso-a2 : commandes 7, 9, 10 (Souris, Clavier, Ecran) <- partition 1
+
+-> les messages sont RÉPARTIS : chaque commande est lue par un seul des deux,
+   jamais les deux. Ensemble, ils ont tout lu, sans doublon.
+   (conso-a1 a aussi lu l'historique 4, 5, 6 : il était seul dans le groupe
+   au début, avant que conso-a2 arrive et que kafka redistribue les partitions)
+
+
+Config 2 : deux consommateurs dans des groupes DIFFÉRENTS
+-----------------------------------------------------
+clients (group clients-group) et statistiques (group statistiques-group) :
+  clients      : commandes 4, 5, 6, 7, 8, 9, 10
+  statistiques : commandes 4, 5, 6, 7, 8, 9, 10
+
+-> chaque groupe reçoit TOUS les messages. Chaque groupe a son propre offset,
+   ils lisent le topic indépendamment l'un de l'autre.
+
+
+Quelle différence ?
+---------------------
+- Même groupe = partage du travail (load balancing). Utile pour lancer
+  plusieurs copies d'un même service quand il y a beaucoup de messages.
+  Limite : pas plus de consommateurs actifs que de partitions (avec 2
+  partitions, un 3e consommateur dans groupe-A n'aurait rien à lire).
+
+- Groupes différents = diffusion (chacun reçoit tout). Utile quand des
+  services différents ont besoin des mêmes événements pour faire des choses
+  différentes (clients compte par client, statistiques calcule le CA).

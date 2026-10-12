@@ -1,0 +1,68 @@
+1.6 - Arrêter un microservice
+=============================
+
+
+Manip
+-----
+1. clients tourne, on crée la commande 4 (Alice, PC) -> consommée tout de suite
+     [partition 1 | offset 0] commande 4 : Alice - PC - 1200 €
+
+2. docker stop clients, puis 3 commandes créées pendant l'arrêt :
+     commande 5 : Alex - Livre      -> partition 0, offset 0
+     commande 6 : Madeleine - Casque -> partition 1, offset 1
+     commande 7 : Alice - Souris    -> partition 1, offset 2
+   commandes répond normalement (201) : il ne sait pas que clients est arrêté.
+
+   État du groupe dans kafka (kafka-consumer-groups.sh --describe --group clients-group) :
+     PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG
+     0          0               1               1
+     1          1               3               2
+   -> 3 messages en attente (lag), stockés dans kafka.
+
+3. docker start clients -> il reçoit les 3 commandes manquées :
+     [partition 0 | offset 0] commande 5 : Alex - Livre - 30 €
+     [partition 1 | offset 1] commande 6 : Madeleine - Casque - 80 €
+     [partition 1 | offset 2] commande 7 : Alice - Souris - 25 €
+   lag repassé à 0 sur les 2 partitions.
+
+
+Observations
+------------
+- Aucun événement perdu. Kafka stocke les messages sur disque, qu'ils soient lus
+  ou non. Le producteur n'a jamais été bloqué par l'arrêt du consommateur :
+  c'est l'intérêt de l'asynchrone (au TP1 en REST, on avait une 503).
+
+- Pas de doublon : la commande 4, déjà lue avant l'arrêt, n'est pas relue.
+  Kafka garde l'offset du groupe "clients-group" (sa position de lecture) et
+  clients reprend exactement là où il s'était arrêté.
+
+- Les messages sont rattrapés dans l'ordre à l'intérieur de chaque partition
+  (offsets 1 puis 2 sur la partition 1). Entre partitions, pas d'ordre garanti.
+
+- Le rattrapage n'est pas instantané au redémarrage (~45 s ici) : le groupe
+  passe en "rebalancing". L'ancien consumer a été coupé sans prévenir kafka,
+  qui attend l'expiration de sa session avant de redonner les partitions au
+  nouveau.
+
+- Limite de notre code : les compteurs par client sont en mémoire, ils
+  repartent de 0 au redémarrage. Après la manip, Alice est à 1 alors qu'elle
+  a 2 commandes (4 et 7) : la commande 4 avait été comptée par l'ancien
+  processus. Kafka garde les messages, mais pas l'état calculé par le service.
+
+
+
+
+
+
+
+
+
+
+> pour la refaire : 
+docker stop clients
+# 2-3 Invoke-RestMethod POST sur http://localhost:8081/commandes
+docker exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group clients-group
+docker start clients
+docker logs -f clients
+
+################################"

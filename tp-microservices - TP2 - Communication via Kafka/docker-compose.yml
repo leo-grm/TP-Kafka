@@ -1,0 +1,92 @@
+# Infrastructure Kafka du TP2
+# Démarrer : docker compose up -d
+# Arrêter  : docker compose down
+
+services:
+
+  # Broker Kafka (mode KRaft : pas besoin de Zookeeper)
+  kafka:
+    image: apache/kafka:3.9.0
+    container_name: kafka
+    ports:
+      # Port pour accéder à Kafka depuis la machine hôte (localhost:9094)
+      - "9094:9094"
+    environment:
+      # Identité du noeud et rôles : ce conteneur est à la fois broker et controller
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+
+      # Listeners = ports sur lesquels Kafka écoute
+      #   PLAINTEXT (9092) : pour les conteneurs du réseau Docker -> kafka:9092
+      #   CONTROLLER (9093) : usage interne de Kafka
+      #   EXTERNAL  (9094) : pour la machine hôte -> localhost:9094
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      # Adresses que Kafka communique aux clients pour se reconnecter à lui
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+
+      # Un seul broker : pas de réplication possible
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+
+      # Topics créés automatiquement avec 2 partitions (utile pour la partie 8 sur les groupes)
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: 2
+
+  # Interface web pour observer les topics et les messages : http://localhost:8090
+  kafka-ui:
+    image: kafbat/kafka-ui:latest
+    container_name: kafka-ui
+    ports:
+      - "8090:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: tp-kafka
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    depends_on:
+      - kafka
+
+  # microservice commandes = producteur kafka
+  commandes:
+    build: ./commandes
+    container_name: commandes
+    ports:
+      - "8081:8080"
+    environment:
+      # dans le réseau docker, kafka se joint par son nom de conteneur
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      - kafka
+
+  # microservice clients = consommateur kafka
+  clients:
+    build: ./clients
+    container_name: clients
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: clients-group
+    depends_on:
+      - kafka
+
+  # 2e consommateur (1.7), autre groupe -> reçoit lui aussi tous les messages
+  statistiques:
+    build: ./statistiques
+    container_name: statistiques
+    ports:
+      - "8082:8080"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: statistiques-group
+    depends_on:
+      - kafka
+
+# Réseau commun : les microservices y seront ajoutés dans les parties suivantes
+networks:
+  default:
+    name: tp-kafka-network
